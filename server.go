@@ -59,7 +59,7 @@ func loginHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var storedPassword string
-	err = db.QueryRow("SELECT password FROM logdata WHERE login=$1", user.Username).Scan(&storedPassword)
+	err = db.QueryRow("SELECT password FROM logdata WHERE user_id=$1", "1").Scan(&storedPassword)
 	if err != nil || storedPassword != user.Password {
 		http.Error(w, "Неверный логин или пароль", http.StatusUnauthorized)
 		return
@@ -74,7 +74,7 @@ func loginHandler(w http.ResponseWriter, r *http.Request) {
 		}
 
 		// Сохранение сессии в базе данных (не забудьте добавить поле user_id в таблицу sessions)
-		_, err = db.Exec("INSERT INTO sessions (uuid) VALUES ($1)", sessionID)
+		_, err = db.Exec("INSERT INTO sessions (uuid, user_id) VALUES ($1, $2)", sessionID, "1")
 		if err != nil {
 			http.Error(w, "Could not create session", http.StatusInternalServerError)
 			return
@@ -96,7 +96,7 @@ func sessionMiddleware(next http.Handler) http.Handler {
 
 		// Проверка существования сессии в базе данных
 		var userID string
-		err := db.QueryRow("SELECT uuid FROM sessions WHERE id=$1", sessionID).Scan(&userID)
+		err := db.QueryRow("SELECT uuid FROM sessions WHERE user_id=$1", "1").Scan(&userID)
 		if err != nil {
 			http.Error(w, "Unauthorized", http.StatusUnauthorized)
 			return
