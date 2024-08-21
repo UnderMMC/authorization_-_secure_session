@@ -1,47 +1,69 @@
 package main
 
 import (
+	"database/sql"
 	"encoding/json"
 	"fmt"
+	"github.com/google/uuid"
+	"github.com/gorilla/mux"
+	"log"
 	"net/http"
 	"time"
 
-	"github.com/google/uuid"
+	_ "github.com/lib/pq"
 )
+
+// Структура для хранения данных пользователя
+type User struct {
+	Username string `json:"username"`
+	Password string `json:"password"`
+}
 
 // Структура для хранения сессии;
 type Session struct {
-	SessionID string    `json: "session_id"`
-	Expiry    time.Time `json: "expiry"`
+	SessionID string    `json:"session_id"`
+	Expiry    time.Time `json:"expiry"`
 }
 
+// Функция входящей информации;
+type LogDataJS struct {
+	Login    string `json:"login"`
+	Password string `json:"password"`
+}
+
+var db *sql.DB
 var session = make(map[string]Session)
 
+/*
 const (
 	storedLogin    = "user123"
 	storedPassword = "pass456"
 )
+*/
 
-// Функция входящей информации;
-type LogDataJS struct {
-	Login    string `json: "login"`
-	Password string `json: "password"`
+func InitializeDataBase() {
+	var err error
+	connStr := "user=postgres password=pgpwd4habr dbname=postgres sslmode=disable"
+	db, err = sql.Open("postgres", connStr)
+	if err != nil {
+		log.Fatal(err)
+	}
 }
 
 func loginHandler(w http.ResponseWriter, r *http.Request) {
-	data := LogDataJS{}
-
-	// Декодирование JSON из тела запроса;
-	err := json.NewDecoder(r.Body).Decode(&data)
+	var user User
+	err := json.NewDecoder(r.Body).Decode(&user)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 
-	// Сравнение полученных логина и пароля с заранее определёнными;
-	if data.Login == storedLogin && data.Password == storedPassword {
-		fmt.Fprintf(w, "Успешный вход: %s", data.Login)
-
+	var storedPassword string
+	err = db.QueryRow("SELECT password FROM logdata WHERE login=$1", user.Username).Scan(&storedPassword)
+	if err != nil || storedPassword != user.Password {
+		http.Error(w, "Неверный логин или пароль", http.StatusUnauthorized)
+		return
+	} else {
 		// Генерация UUID для сессии
 		sessionID := uuid.New().String()
 		expiry := time.Now().Add(2 * time.Minute)
@@ -50,11 +72,16 @@ func loginHandler(w http.ResponseWriter, r *http.Request) {
 			SessionID: sessionID,
 			Expiry:    expiry,
 		}
+
+		// Сохранение сессии в базе данных (не забудьте добавить поле user_id в таблицу sessions)
+		_, err = db.Exec("INSERT INTO sessions (uuid) VALUES ($1)", sessionID)
+		if err != nil {
+			http.Error(w, "Could not create session", http.StatusInternalServerError)
+			return
+		}
 		// Возвращаем сессию в формате JSON
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(session)
-	} else {
-		http.Error(w, "Неверный логин или пароль", http.StatusUnauthorized)
 	}
 }
 
@@ -67,8 +94,11 @@ func sessionMiddleware(next http.Handler) http.Handler {
 			return
 		}
 
-		if sessionID != "valid-session-id" { // Замените на реальную проверку
-			http.Error(w, "Invalid session", http.StatusUnauthorized)
+		// Проверка существования сессии в базе данных
+		var userID string
+		err := db.QueryRow("SELECT uuid FROM sessions WHERE id=$1", sessionID).Scan(&userID)
+		if err != nil {
+			http.Error(w, "Unauthorized", http.StatusUnauthorized)
 			return
 		}
 
@@ -77,14 +107,19 @@ func sessionMiddleware(next http.Handler) http.Handler {
 }
 
 func protectedHandler(w http.ResponseWriter, r *http.Request) {
-	fmt.Fprintln(w, "Вы получили доступ к защищенному ресурсу!")
+	userID := r.Context().Value("userID").(string)
+	fmt.Fprintf(w, "Welcome, %s!", userID)
 }
 
 func main() {
-	mux := http.NewServeMux()
+	InitializeDataBase()
 
-	mux.HandleFunc("/log", loginHandler)
-	mux.Handle("/protected", sessionMiddleware(http.HandlerFunc(protectedHandler)))
+	r := mux.NewRouter()
 
-	http.ListenAndServe(":8080", mux)
+	r.HandleFunc("/login", loginHandler).Methods("POST")
+
+	// Применяем middleware к защищенному маршруту
+	r.Handle("/protected", sessionMiddleware(http.HandlerFunc(protectedHandler))).Methods("GET")
+
+	log.Fatal(http.ListenAndServe(":8080", r))
 }
