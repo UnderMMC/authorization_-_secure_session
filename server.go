@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"github.com/google/uuid"
 	"github.com/gorilla/mux"
+	"golang.org/x/crypto/bcrypt"
 	"log"
 	"net/http"
 	"time"
@@ -38,15 +39,27 @@ func InitializeDataBase() {
 	}
 }
 
+// Хеширование пароля
+func hashPassword(password string) (string, error) {
+	bytes, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
+	return string(bytes), err
+}
+
+// Проверка пароля
+func checkPasswordHash(password, hash string) error {
+	return bcrypt.CompareHashAndPassword([]byte(hash), []byte(password))
+}
+
 func registrHandler(w http.ResponseWriter, r *http.Request) {
-	var reg_user User
-	err := json.NewDecoder(r.Body).Decode(&reg_user)
+	var regUser User
+	err := json.NewDecoder(r.Body).Decode(&regUser)
 	if err != nil {
 		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
 
-	_, err = db.Exec("INSERT INTO logdata (login, password) VALUES ($1, $2)", reg_user.Login, reg_user.Password)
+	hashedPassword, err := hashPassword(regUser.Password)
+	_, err = db.Exec("INSERT INTO logdata (login, hashed_pas) VALUES ($1, $2)", regUser.Login, hashedPassword)
 	if err != nil {
 		return
 	}
@@ -61,8 +74,8 @@ func loginHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var storedPassword string
-	err = db.QueryRow("SELECT password FROM logdata WHERE login=$1", user.Login).Scan(&storedPassword)
-	if err != nil || storedPassword != user.Password {
+	err = db.QueryRow("SELECT hashed_pas FROM logdata WHERE login=$1", user.Login).Scan(&storedPassword)
+	if err != nil || checkPasswordHash(user.Password, storedPassword) != nil {
 		http.Error(w, "Неверный логин или пароль", http.StatusUnauthorized)
 		return
 	} else {
