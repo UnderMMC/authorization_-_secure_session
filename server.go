@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -15,7 +16,7 @@ import (
 
 // Структура для хранения данных пользователя
 type User struct {
-	Username string `json:"username"`
+	Login    string `json:"login"`
 	Password string `json:"password"`
 }
 
@@ -25,21 +26,8 @@ type Session struct {
 	Expiry    time.Time `json:"expiry"`
 }
 
-// Функция входящей информации;
-type LogDataJS struct {
-	Login    string `json:"login"`
-	Password string `json:"password"`
-}
-
 var db *sql.DB
 var session = make(map[string]Session)
-
-/*
-const (
-	storedLogin    = "user123"
-	storedPassword = "pass456"
-)
-*/
 
 func InitializeDataBase() {
 	var err error
@@ -47,6 +35,20 @@ func InitializeDataBase() {
 	db, err = sql.Open("postgres", connStr)
 	if err != nil {
 		log.Fatal(err)
+	}
+}
+
+func registrHandler(w http.ResponseWriter, r *http.Request) {
+	var reg_user User
+	err := json.NewDecoder(r.Body).Decode(&reg_user)
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+
+	_, err = db.Exec("INSERT INTO logdata (login, password) VALUES ($1, $2)", reg_user.Login, reg_user.Password)
+	if err != nil {
+		return
 	}
 }
 
@@ -59,7 +61,7 @@ func loginHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var storedPassword string
-	err = db.QueryRow("SELECT password FROM logdata WHERE user_id=$1", "1").Scan(&storedPassword)
+	err = db.QueryRow("SELECT password FROM logdata WHERE login=$1", user.Login).Scan(&storedPassword)
 	if err != nil || storedPassword != user.Password {
 		http.Error(w, "Неверный логин или пароль", http.StatusUnauthorized)
 		return
@@ -102,13 +104,25 @@ func sessionMiddleware(next http.Handler) http.Handler {
 			return
 		}
 
-		next.ServeHTTP(w, r)
+		// Добавляем userID в контекст
+		ctx := context.WithValue(r.Context(), "userID", userID)
+		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }
 
 func protectedHandler(w http.ResponseWriter, r *http.Request) {
 	userID := r.Context().Value("userID").(string)
-	fmt.Fprintf(w, "Welcome, %s!", userID)
+	// Создаем ответ в формате JSON
+	response := map[string]string{
+		"message": fmt.Sprintf("Welcome, %s!", userID),
+	}
+
+	// Устанавливаем заголовок Content-Type
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK) // Устанавливаем статус 200 OK
+
+	// Кодируем ответ в JSON и отправляем его клиенту
+	json.NewEncoder(w).Encode(response)
 }
 
 func main() {
@@ -116,6 +130,7 @@ func main() {
 
 	r := mux.NewRouter()
 
+	r.HandleFunc("/reg", registrHandler).Methods("POST")
 	r.HandleFunc("/login", loginHandler).Methods("POST")
 
 	// Применяем middleware к защищенному маршруту
