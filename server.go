@@ -1,11 +1,13 @@
 package main
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"fmt"
 	"github.com/google/uuid"
 	"github.com/gorilla/mux"
+	"golang.org/x/crypto/bcrypt"
 	"log"
 	"net/http"
 	"time"
@@ -15,7 +17,7 @@ import (
 
 // Структура для хранения данных пользователя
 type User struct {
-	Username string `json:"username"`
+	Login    string `json:"login"`
 	Password string `json:"password"`
 }
 
@@ -25,21 +27,8 @@ type Session struct {
 	Expiry    time.Time `json:"expiry"`
 }
 
-// Функция входящей информации;
-type LogDataJS struct {
-	Login    string `json:"login"`
-	Password string `json:"password"`
-}
-
 var db *sql.DB
 var session = make(map[string]Session)
-
-/*
-const (
-	storedLogin    = "user123"
-	storedPassword = "pass456"
-)
-*/
 
 func InitializeDataBase() {
 	var err error
@@ -47,6 +36,32 @@ func InitializeDataBase() {
 	db, err = sql.Open("postgres", connStr)
 	if err != nil {
 		log.Fatal(err)
+	}
+}
+
+// Хеширование пароля
+func hashPassword(password string) (string, error) {
+	bytes, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
+	return string(bytes), err
+}
+
+// Проверка пароля
+func checkPasswordHash(password, hash string) error {
+	return bcrypt.CompareHashAndPassword([]byte(hash), []byte(password))
+}
+
+func registrHandler(w http.ResponseWriter, r *http.Request) {
+	var regUser User
+	err := json.NewDecoder(r.Body).Decode(&regUser)
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+
+	hashedPassword, err := hashPassword(regUser.Password)
+	_, err = db.Exec("INSERT INTO logdata (login, hashed_pas) VALUES ($1, $2)", regUser.Login, hashedPassword)
+	if err != nil {
+		return
 	}
 }
 
@@ -59,8 +74,8 @@ func loginHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var storedPassword string
-	err = db.QueryRow("SELECT password FROM logdata WHERE login=$1", user.Username).Scan(&storedPassword)
-	if err != nil || storedPassword != user.Password {
+	err = db.QueryRow("SELECT hashed_pas FROM logdata WHERE login=$1", user.Login).Scan(&storedPassword)
+	if err != nil || checkPasswordHash(user.Password, storedPassword) != nil {
 		http.Error(w, "Неверный логин или пароль", http.StatusUnauthorized)
 		return
 	} else {
@@ -74,7 +89,7 @@ func loginHandler(w http.ResponseWriter, r *http.Request) {
 		}
 
 		// Сохранение сессии в базе данных (не забудьте добавить поле user_id в таблицу sessions)
-		_, err = db.Exec("INSERT INTO sessions (uuid) VALUES ($1)", sessionID)
+		_, err = db.Exec("INSERT INTO sessions (uuid, user_id) VALUES ($1, $2)", sessionID, "1")
 		if err != nil {
 			http.Error(w, "Could not create session", http.StatusInternalServerError)
 			return
@@ -96,19 +111,31 @@ func sessionMiddleware(next http.Handler) http.Handler {
 
 		// Проверка существования сессии в базе данных
 		var userID string
-		err := db.QueryRow("SELECT uuid FROM sessions WHERE id=$1", sessionID).Scan(&userID)
+		err := db.QueryRow("SELECT uuid FROM sessions WHERE user_id=$1", "1").Scan(&userID)
 		if err != nil {
 			http.Error(w, "Unauthorized", http.StatusUnauthorized)
 			return
 		}
 
-		next.ServeHTTP(w, r)
+		// Добавляем userID в контекст
+		ctx := context.WithValue(r.Context(), "userID", userID)
+		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }
 
 func protectedHandler(w http.ResponseWriter, r *http.Request) {
 	userID := r.Context().Value("userID").(string)
-	fmt.Fprintf(w, "Welcome, %s!", userID)
+	// Создаем ответ в формате JSON
+	response := map[string]string{
+		"message": fmt.Sprintf("Welcome, %s!", userID),
+	}
+
+	// Устанавливаем заголовок Content-Type
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK) // Устанавливаем статус 200 OK
+
+	// Кодируем ответ в JSON и отправляем его клиенту
+	json.NewEncoder(w).Encode(response)
 }
 
 func main() {
@@ -116,6 +143,7 @@ func main() {
 
 	r := mux.NewRouter()
 
+	r.HandleFunc("/reg", registrHandler).Methods("POST")
 	r.HandleFunc("/login", loginHandler).Methods("POST")
 
 	// Применяем middleware к защищенному маршруту
